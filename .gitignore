@@ -18,16 +18,6 @@ ENV/
 *.swp
 *.swo
 
-# AI assistant / local context artifacts
-.codex/
-.claude/
-.cursor/
-.aider*
-AGENTS.local.md
-CLAUDE.local.md
-docs/ai-memory/
-graphify-out/
-
 # Logs
 *.log
 logs/
