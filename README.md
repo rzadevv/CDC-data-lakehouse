@@ -2,76 +2,118 @@
 
 ![Architecture](3.jpg)
 
-## About
+A production-style local data platform that streams PostgreSQL changes into an Iceberg lakehouse with Bronze, Silver, and Gold layers.
 
-This project demonstrates a real-time data pipeline. When something changes in a database (insert, update, delete), that change automatically flows into a data lake for analytics.
+## What This Demonstrates
 
-The goal was to understand how streaming data pipelines work - capturing every database change and processing it in real-time, similar to what companies like Netflix or Uber do.
+- Multi-table Change Data Capture from PostgreSQL WAL with Debezium
+- Kafka-based streaming transport
+- Config-driven Spark Structured Streaming ingestion
+- Iceberg `MERGE INTO` current-state tables for upserts and deletes
+- Bronze/Silver/Gold lakehouse modeling
+- Schema Registry path for Avro CDC and schema evolution demos
+- MinIO as S3-compatible object storage
+- Docker Compose orchestration for local reproducibility
 
-### The Problem
+## Architecture
 
-Traditional ETL jobs run on schedules (like once a day). This means data in the analytics layer is always stale. If a transaction happens at 2pm, it might not show up in reports until the next morning.
+```mermaid
+flowchart LR
+    PG[(PostgreSQL OLTP)] -->|WAL / logical replication| DBZ[Debezium Connect]
+    DBZ -->|CDC topics| KAFKA[(Kafka)]
+    DBZ -. Avro schemas .-> SR[Schema Registry]
+    KAFKA --> SPARK[Spark Structured Streaming]
+    SPARK --> B[Bronze Iceberg: raw CDC events]
+    SPARK --> S[Silver Iceberg: current-state tables]
+    S --> G[Gold Iceberg: analytics aggregates]
+    B --> MINIO[(MinIO lakehouse bucket)]
+    S --> MINIO
+    G --> MINIO
+```
 
-### The Solution
+## Lakehouse Layers
 
-This pipeline uses Change Data Capture (CDC) to stream changes as they happen. Debezium watches the PostgreSQL transaction log and sends every change to Kafka immediately. Spark picks up these events and merges them into Iceberg tables. The result is near real-time data in the lakehouse.
+| Layer | Purpose | Example Tables |
+|---|---|---|
+| Bronze | Raw Debezium events with Kafka metadata | `bronze.users_cdc_events`, `bronze.financial_transactions_cdc_events` |
+| Silver | Current-state business entities maintained by CDC merges/deletes | `silver.users`, `silver.accounts`, `silver.merchants`, `silver.financial_transactions` |
+| Gold | Analytics-ready aggregates rebuilt from Silver | `gold.daily_transaction_summary`, `gold.user_account_summary` |
 
-The key part is the MERGE INTO operation - it handles inserts, updates, and deletes properly, so the lakehouse always reflects the current state of the source database.
+## CDC Tables
 
-## What It Does
+The active source tables are configured in [`pipeline_config.py`](pipeline_config.py):
 
-![Pipeline](1.png)
+- `users`
+- `merchants`
+- `accounts`
+- `financial_transactions`
 
-- Watches a PostgreSQL database for changes
-- Captures those changes using Debezium (CDC tool)
-- Sends them through Kafka
-- Processes with Spark Streaming
-- Stores in Iceberg tables (modern data lake format)
+Adding another CDC table means adding metadata in one place: primary key, Kafka topic, and column definitions.
 
-![CDC Flow](2.png)
-
-## Tech Stack
-
-- **PostgreSQL** - source database
-- **Debezium** - captures insert/update/delete events
-- **Kafka** - message queue
-- **Spark** - stream processor
-- **Iceberg** - table format with ACID support
-- **MinIO** - S3-compatible storage
-- **Docker** - containerization
-
-## How to Run
+## Quick Start
 
 ```bash
-# Setup environment
 cp .env.example .env
-
-# Start services
-docker-compose up -d
-
-# Copy Spark script
-docker cp spark_streaming.py spark-master:/tmp/
-
-# Register CDC connector
-curl -X POST http://localhost:8083/connectors -H "Content-Type: application/json" -d @debezium-connector.json
-
-# Run streaming job
-docker exec -it spark-master /opt/spark/bin/spark-submit --packages org.apache.spark:spark-sql-kafka-0-10_2.12:3.5.0,org.apache.iceberg:iceberg-spark-runtime-3.5_2.12:1.4.2,org.apache.hadoop:hadoop-aws:3.3.4,com.amazonaws:aws-java-sdk-bundle:1.12.262 /tmp/spark_streaming.py
-
-# Generate test data
-python data_generator.py
+make up
+make register
+make spark-job
+make stream-data
 ```
+
+`make register` uses the JSON Debezium connector, which is the default path for the Spark lakehouse job.
+
+## Schema Registry + Schema Evolution Demo
+
+Start the platform, then register the Avro connector instead of the JSON connector when you want to demonstrate Schema Registry subjects and versions:
+
+```bash
+make up
+make register-avro
+make stream-data
+make schema-evolution
+make schema-subjects
+```
+
+The schema evolution script:
+
+1. Adds `risk_score` to `financial_transactions` if it does not already exist.
+2. Inserts a transaction with the new field populated.
+3. Prints Schema Registry subjects and versions when the Avro connector is active.
+
+The Spark table config already includes nullable `risk_score`, so older events parse it as `null` and evolved events can flow into Silver.
+
+Use either the JSON connector or the Avro connector for a run, not both at the same time. They publish to the same Debezium topic names with different serialization formats.
 
 ## Services
 
-| Service | Port |
-|---------|------|
-| PostgreSQL | 5432 |
-| Kafka | 9092 |
-| Debezium | 8083 |
-| Spark UI | 8080 |
-| MinIO | 9001 |
+| Service | Port | Purpose |
+|---|---:|---|
+| PostgreSQL | 5432 | OLTP source database |
+| Kafka | 9092 | CDC event transport |
+| Debezium Connect | 8083 | PostgreSQL CDC connector runtime |
+| Schema Registry | 8081 | Avro schema registration and evolution demo |
+| Spark UI | 8080 | Streaming job UI |
+| MinIO API | 9000 | S3-compatible object storage |
+| MinIO Console | 9001 | Lakehouse bucket inspection |
+| Trino | 8085 | Present but not the default query path |
 
-## Issues
+## Useful Commands
 
-> Trino doesn't work with the current setup. Trino 435 doesn't support `iceberg.catalog.type=hadoop`. To fix this, you'd need to add a REST catalog like Nessie. For now, use Spark SQL to query the Iceberg tables instead.
+```bash
+make help              # list available commands
+make up                # start services
+make register          # register JSON connector for Spark ingestion
+make register-avro     # register Avro connector for Schema Registry demo
+make spark-job         # submit Spark streaming job
+make stream-data       # generate multi-table CDC workload
+make schema-evolution  # alter source schema and emit evolved record
+make test              # run unit tests when pytest/pyspark are installed
+make down              # stop services
+make clean             # remove containers and volumes
+```
+
+## Notes
+
+- The default streaming job expects JSON Debezium messages with schemas enabled.
+- The Avro connector is for the Schema Registry/schema evolution demo path.
+- Trino remains outside the main demo path because this repo still uses a Hadoop Iceberg catalog; a REST catalog or Nessie would be the next query-engine upgrade.

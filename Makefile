@@ -1,4 +1,4 @@
-.PHONY: up down logs stream-data spark-job query clean help
+.PHONY: up down logs stream-data spark-job query clean help register register-json register-avro schema-evolution schema-subjects
 
 # Default target
 help:
@@ -10,7 +10,9 @@ help:
 	@echo "  make stream-data - Run data generator"
 	@echo "  make spark-job   - Submit Spark streaming job"
 	@echo "  make query       - Open Trino CLI"
-	@echo "  make register    - Register Debezium connector"
+	@echo "  make register    - Register JSON Debezium connector for Spark pipeline"
+	@echo "  make register-avro - Register Avro connector for Schema Registry demo"
+	@echo "  make schema-evolution - Add risk_score column and emit evolved CDC"
 	@echo "  make clean       - Remove all containers and volumes"
 	@echo "  make test        - Run unit tests"
 
@@ -31,10 +33,23 @@ clean:
 	docker-compose down -v --remove-orphans
 
 # Register Debezium connector
-register:
-	curl -X POST -H "Content-Type: application/json" -d @debezium.json http://localhost:8083/connectors
+register: register-json
+
+register-json:
+	curl -X POST -H "Content-Type: application/json" -d @debezium-connector.json http://localhost:8083/connectors
 	@echo ""
-	@echo "Connector registered. Check status: curl http://localhost:8083/connectors/postgres-connector/status"
+	@echo "Connector registered. Check status: curl http://localhost:8083/connectors/postgres-connector-json/status"
+
+register-avro:
+	curl -X POST -H "Content-Type: application/json" -d @debezium-avro-connector.json http://localhost:8083/connectors
+	@echo ""
+	@echo "Avro connector registered. Check status: curl http://localhost:8083/connectors/postgres-connector-avro/status"
+
+schema-subjects:
+	curl -s http://localhost:8081/subjects
+
+schema-evolution:
+	python scripts/schema_evolution_demo.py
 
 # Data generation
 stream-data:

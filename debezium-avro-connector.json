@@ -1,5 +1,5 @@
 {
-  "name": "postgres-connector-json",
+  "name": "postgres-connector-avro",
   "config": {
     "connector.class": "io.debezium.connector.postgresql.PostgresConnector",
     "plugin.name": "pgoutput",
@@ -9,15 +9,15 @@
     "database.password": "password",
     "database.dbname": "mydb",
     "database.server.name": "postgres_server",
-    "slot.name": "cdc_lakehouse_json_slot",
-    "publication.name": "cdc_lakehouse_json_pub",
+    "slot.name": "cdc_lakehouse_avro_slot",
+    "publication.name": "cdc_lakehouse_avro_pub",
     "table.include.list": "public.users,public.merchants,public.accounts,public.financial_transactions",
     "decimal.handling.mode": "double",
     "include.schema.changes": "true",
     "tombstones.on.delete": "false",
-    "key.converter": "org.apache.kafka.connect.json.JsonConverter",
-    "key.converter.schemas.enable": "true",
-    "value.converter": "org.apache.kafka.connect.json.JsonConverter",
-    "value.converter.schemas.enable": "true"
+    "key.converter": "io.confluent.connect.avro.AvroConverter",
+    "key.converter.schema.registry.url": "http://schema-registry:8081",
+    "value.converter": "io.confluent.connect.avro.AvroConverter",
+    "value.converter.schema.registry.url": "http://schema-registry:8081"
   }
 }

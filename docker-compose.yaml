@@ -42,19 +42,43 @@ services:
 
   # Debezium CDC connector
   connect:
-    image: quay.io/debezium/connect:1.9
+    build:
+      context: ./connect
     container_name: connect
     ports:
       - "8083:8083"
     depends_on:
       - broker
       - postgres
+      - schema-registry
     environment:
-      - BOOTSTRAP_SERVERS=broker:29092
-      - GROUP_ID=1
-      - CONFIG_STORAGE_TOPIC=my_connect_configs
-      - OFFSET_STORAGE_TOPIC=my_connect_offsets
-      - STATUS_STORAGE_TOPIC=my_connect_statuses
+      CONNECT_BOOTSTRAP_SERVERS: broker:29092
+      CONNECT_GROUP_ID: cdc-lakehouse-connect
+      CONNECT_CONFIG_STORAGE_TOPIC: cdc_lakehouse_connect_configs
+      CONNECT_OFFSET_STORAGE_TOPIC: cdc_lakehouse_connect_offsets
+      CONNECT_STATUS_STORAGE_TOPIC: cdc_lakehouse_connect_statuses
+      CONNECT_CONFIG_STORAGE_REPLICATION_FACTOR: 1
+      CONNECT_OFFSET_STORAGE_REPLICATION_FACTOR: 1
+      CONNECT_STATUS_STORAGE_REPLICATION_FACTOR: 1
+      CONNECT_KEY_CONVERTER: org.apache.kafka.connect.json.JsonConverter
+      CONNECT_VALUE_CONVERTER: org.apache.kafka.connect.json.JsonConverter
+      CONNECT_REST_ADVERTISED_HOST_NAME: connect
+      CONNECT_PLUGIN_PATH: /usr/share/java,/usr/share/confluent-hub-components
+    networks:
+      - lakehouse-net
+
+  # Schema Registry for Avro CDC and schema evolution demos
+  schema-registry:
+    image: confluentinc/cp-schema-registry:7.3.0
+    container_name: schema-registry
+    depends_on:
+      - broker
+    ports:
+      - "8081:8081"
+    environment:
+      SCHEMA_REGISTRY_HOST_NAME: schema-registry
+      SCHEMA_REGISTRY_KAFKASTORE_BOOTSTRAP_SERVERS: broker:29092
+      SCHEMA_REGISTRY_LISTENERS: http://0.0.0.0:8081
     networks:
       - lakehouse-net
 
@@ -80,6 +104,8 @@ services:
     ports:
       - "8080:8080"
       - "7077:7077"
+    volumes:
+      - ./:/app
     networks:
       - lakehouse-net
 
@@ -90,6 +116,8 @@ services:
     command: /opt/spark/bin/spark-class org.apache.spark.deploy.worker.Worker spark://spark-master:7077
     depends_on:
       - spark-master
+    volumes:
+      - ./:/app
     networks:
       - lakehouse-net
 

@@ -1,163 +1,141 @@
-"""
-Unit tests for CDC transformation logic.
-Tests the parsing and processing of Debezium CDC events.
-"""
+"""Tests for the config-driven multi-table CDC transformation layer."""
+import json
+
 import pytest
 from pyspark.sql import SparkSession
-from pyspark.sql.types import StructType, StructField, StringType, IntegerType, DoubleType
-import json
+from pyspark.sql.functions import from_json
+
+from pipeline_config import CDC_TABLES, topic_pattern
+from spark_streaming import get_debezium_schema, latest_changes, spark_struct
 
 
 @pytest.fixture(scope="module")
 def spark():
-    """Create a SparkSession for testing."""
-    return SparkSession.builder \
-        .appName("CDC-Tests") \
-        .master("local[*]") \
-        .getOrCreate()
+    session = SparkSession.builder.appName("CDC-Tests").master("local[*]").getOrCreate()
+    yield session
+    session.stop()
 
 
-class TestCDCParsing:
-    """Tests for CDC event parsing logic."""
-    
-    def test_parse_insert_event(self, spark):
-        """Test parsing a Debezium INSERT (create) event."""
-        # Simulated Debezium event for INSERT
-        cdc_event = {
+class TestPipelineConfig:
+    def test_all_tables_have_primary_keys_topics_and_columns(self):
+        assert set(CDC_TABLES) == {"users", "merchants", "accounts", "financial_transactions"}
+
+        for table_name, config in CDC_TABLES.items():
+            assert config["primary_key"] in [column["name"] for column in config["columns"]]
+            assert config["topic"].endswith(f"public.{table_name}")
+            assert config["columns"]
+
+    def test_topic_pattern_covers_configured_tables(self):
+        pattern = topic_pattern()
+        assert "postgres_server" in pattern
+        for table_name in CDC_TABLES:
+            assert table_name in pattern
+
+    def test_financial_transactions_supports_evolved_risk_score(self):
+        columns = [column["name"] for column in CDC_TABLES["financial_transactions"]["columns"]]
+        assert "risk_score" in columns
+
+
+class TestDebeziumParsing:
+    def test_parse_user_insert_event(self, spark):
+        config = CDC_TABLES["users"]
+        event = {
             "payload": {
                 "before": None,
                 "after": {
-                    "transaction_id": 1,
-                    "user_id": 42,
-                    "transaction_amount": 150.50,
-                    "transaction_type": "CREDIT"
+                    "user_id": 1,
+                    "full_name": "Ada Lovelace",
+                    "email": "ada@example.com",
+                    "status": "ACTIVE",
+                    "created_at": "2026-04-30 10:00:00",
+                    "updated_at": "2026-04-30 10:00:00",
                 },
-                "op": "c",  # c = create
-                "ts_ms": 1703100000000
+                "op": "c",
+                "ts_ms": 1777543200000,
             }
         }
-        
-        # Verify the structure is correct
-        assert cdc_event["payload"]["op"] == "c"
-        assert cdc_event["payload"]["after"]["transaction_id"] == 1
-        assert cdc_event["payload"]["after"]["transaction_amount"] == 150.50
-    
-    def test_parse_update_event(self, spark):
-        """Test parsing a Debezium UPDATE event."""
-        cdc_event = {
+
+        df = spark.createDataFrame([(json.dumps(event),)], ["value"])
+        parsed = df.withColumn("data", from_json("value", get_debezium_schema(config)))
+        row = parsed.select("data.payload.op", "data.payload.after.user_id", "data.payload.after.email").first()
+
+        assert row["op"] == "c"
+        assert row["user_id"] == 1
+        assert row["email"] == "ada@example.com"
+
+    def test_parse_evolved_transaction_event(self, spark):
+        config = CDC_TABLES["financial_transactions"]
+        event = {
             "payload": {
-                "before": {
-                    "transaction_id": 1,
-                    "user_id": 42,
-                    "transaction_amount": 150.50,
-                    "transaction_type": "CREDIT"
-                },
+                "before": None,
                 "after": {
-                    "transaction_id": 1,
-                    "user_id": 42,
-                    "transaction_amount": 200.00,  # Updated amount
-                    "transaction_type": "DEBIT"    # Updated type
+                    "transaction_id": 10,
+                    "account_id": 20,
+                    "user_id": 30,
+                    "merchant_id": 40,
+                    "transaction_amount": 999.99,
+                    "transaction_type": "DEBIT",
+                    "transaction_status": "REVIEW",
+                    "timestamp": "2026-04-30 12:00:00",
+                    "risk_score": 87.5,
                 },
-                "op": "u",  # u = update
-                "ts_ms": 1703100001000
+                "op": "c",
+                "ts_ms": 1777550400000,
             }
         }
-        
-        assert cdc_event["payload"]["op"] == "u"
-        assert cdc_event["payload"]["before"]["transaction_amount"] == 150.50
-        assert cdc_event["payload"]["after"]["transaction_amount"] == 200.00
-    
-    def test_parse_delete_event(self, spark):
-        """Test parsing a Debezium DELETE event."""
-        cdc_event = {
-            "payload": {
-                "before": {
-                    "transaction_id": 1,
-                    "user_id": 42,
-                    "transaction_amount": 200.00,
-                    "transaction_type": "DEBIT"
+
+        df = spark.createDataFrame([(json.dumps(event),)], ["value"])
+        parsed = df.withColumn("data", from_json("value", get_debezium_schema(config)))
+        row = parsed.select("data.payload.after.transaction_id", "data.payload.after.risk_score").first()
+
+        assert row["transaction_id"] == 10
+        assert row["risk_score"] == 87.5
+
+
+class TestLatestChangeLogic:
+    def test_latest_delete_wins_per_primary_key(self, spark):
+        config = CDC_TABLES["accounts"]
+        record_schema = spark_struct(config["columns"])
+        rows = [
+            (
+                "u",
+                1000,
+                None,
+                {
+                    "account_id": 1,
+                    "user_id": 7,
+                    "account_type": "CHECKING",
+                    "balance": 500.0,
+                    "status": "OPEN",
+                    "updated_at": "t1",
                 },
-                "after": None,
-                "op": "d",  # d = delete
-                "ts_ms": 1703100002000
-            }
-        }
-        
-        assert cdc_event["payload"]["op"] == "d"
-        assert cdc_event["payload"]["after"] is None
-        assert cdc_event["payload"]["before"]["transaction_id"] == 1
-
-
-class TestOperationLogic:
-    """Tests for operation routing logic."""
-    
-    def test_operation_is_upsert(self):
-        """Test that INSERT and UPDATE operations are classified as upserts."""
-        upsert_ops = ["c", "u", "r"]  # create, update, read (snapshot)
-        
-        for op in upsert_ops:
-            assert op in ["c", "u", "r"], f"Operation {op} should be an upsert"
-    
-    def test_operation_is_delete(self):
-        """Test that DELETE operations are correctly identified."""
-        delete_ops = ["d"]
-        
-        for op in delete_ops:
-            assert op == "d", f"Operation {op} should be a delete"
-    
-    def test_extract_id_for_delete(self):
-        """Test extracting transaction_id from 'before' for deletes."""
-        cdc_event = {
-            "payload": {
-                "before": {"transaction_id": 123},
-                "after": None,
-                "op": "d"
-            }
-        }
-        
-        # For deletes, we need to use 'before' to get the ID
-        if cdc_event["payload"]["op"] == "d":
-            txn_id = cdc_event["payload"]["before"]["transaction_id"]
-            assert txn_id == 123
-
-
-class TestDataTransformations:
-    """Tests for data transformation functions."""
-    
-    def test_amount_is_numeric(self, spark):
-        """Test that transaction amounts are properly typed."""
-        data = [("1", 42, 150.50, "CREDIT")]
-        schema = StructType([
-            StructField("transaction_id", StringType()),
-            StructField("user_id", IntegerType()),
-            StructField("transaction_amount", DoubleType()),
-            StructField("transaction_type", StringType())
-        ])
-        
-        df = spark.createDataFrame(data, schema)
-        
-        # Verify the amount column is a double
-        assert df.schema["transaction_amount"].dataType == DoubleType()
-    
-    def test_filter_null_ids(self, spark):
-        """Test filtering out records with null transaction_id."""
-        data = [
-            (1, 42, 100.0, "CREDIT"),
-            (None, 43, 200.0, "DEBIT"),
-            (3, 44, 300.0, "CREDIT")
+            ),
+            (
+                "d",
+                2000,
+                {
+                    "account_id": 1,
+                    "user_id": 7,
+                    "account_type": "CHECKING",
+                    "balance": 500.0,
+                    "status": "OPEN",
+                    "updated_at": "t1",
+                },
+                None,
+            ),
         ]
-        schema = StructType([
-            StructField("transaction_id", IntegerType()),
-            StructField("user_id", IntegerType()),
-            StructField("transaction_amount", DoubleType()),
-            StructField("transaction_type", StringType())
-        ])
-        
-        df = spark.createDataFrame(data, schema)
-        filtered = df.filter(df.transaction_id.isNotNull())
-        
-        assert filtered.count() == 2
+        schema = (
+            "op string, event_ts_ms long, "
+            "before struct<account_id:int,user_id:int,account_type:string,"
+            "balance:double,status:string,updated_at:string>, "
+            "after struct<account_id:int,user_id:int,account_type:string,"
+            "balance:double,status:string,updated_at:string>"
+        )
+        parsed_df = spark.createDataFrame(rows, schema)
 
+        latest = latest_changes(parsed_df, config)
+        row = latest.select("op", "account_id").first()
 
-if __name__ == "__main__":
-    pytest.main([__file__, "-v"])
+        assert row["op"] == "d"
+        assert row["account_id"] == 1
+        assert record_schema["balance"].dataType.simpleString() == "double"
