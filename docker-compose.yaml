@@ -96,6 +96,26 @@ services:
     networks:
       - lakehouse-net
 
+  # Iceberg REST catalog shared by Spark writers and Trino readers
+  iceberg-rest:
+    image: tabulario/iceberg-rest:1.4.2
+    container_name: iceberg-rest
+    depends_on:
+      - minio
+      - minio-init
+    ports:
+      - "8181:8181"
+    environment:
+      AWS_ACCESS_KEY_ID: ${MINIO_ROOT_USER}
+      AWS_SECRET_ACCESS_KEY: ${MINIO_ROOT_PASSWORD}
+      AWS_REGION: us-east-1
+      CATALOG_WAREHOUSE: s3://lakehouse/warehouse
+      CATALOG_IO__IMPL: org.apache.iceberg.aws.s3.S3FileIO
+      CATALOG_S3_ENDPOINT: http://minio:9000
+      CATALOG_S3_PATH__STYLE__ACCESS: "true"
+    networks:
+      - lakehouse-net
+
   # Spark master
   spark-master:
     image: apache/spark:3.5.0
@@ -134,6 +154,76 @@ services:
       - ./trino/catalog:/etc/trino/catalog
     depends_on:
       - minio
+      - iceberg-rest
+    networks:
+      - lakehouse-net
+
+  # Airflow orchestration UI for connector registration and platform checks
+  airflow:
+    image: apache/airflow:2.8.1
+    container_name: airflow
+    command: standalone
+    ports:
+      - "8088:8080"
+    environment:
+      AIRFLOW__CORE__LOAD_EXAMPLES: "false"
+      AIRFLOW__CORE__DAGS_ARE_PAUSED_AT_CREATION: "false"
+      AIRFLOW__WEBSERVER__EXPOSE_CONFIG: "true"
+    volumes:
+      - ./airflow/dags:/opt/airflow/dags
+      - ./:/opt/airflow/project
+    depends_on:
+      - connect
+      - schema-registry
+      - iceberg-rest
+    networks:
+      - lakehouse-net
+
+  # Prometheus metrics backend
+  prometheus:
+    image: prom/prometheus:v2.51.0
+    container_name: prometheus
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./observability/prometheus.yml:/etc/prometheus/prometheus.yml
+    depends_on:
+      - platform-exporter
+    networks:
+      - lakehouse-net
+
+  # Grafana dashboard for platform health
+  grafana:
+    image: grafana/grafana:10.4.1
+    container_name: grafana
+    ports:
+      - "3000:3000"
+    environment:
+      GF_SECURITY_ADMIN_USER: admin
+      GF_SECURITY_ADMIN_PASSWORD: admin
+    volumes:
+      - ./observability/grafana/provisioning:/etc/grafana/provisioning
+      - ./observability/grafana/dashboards:/var/lib/grafana/dashboards
+    depends_on:
+      - prometheus
+    networks:
+      - lakehouse-net
+
+  # Custom exporter for portfolio-friendly CDC platform health metrics
+  platform-exporter:
+    build:
+      context: ./observability
+    container_name: platform-exporter
+    ports:
+      - "9108:9108"
+    environment:
+      CONNECT_URL: http://connect:8083
+      SCHEMA_REGISTRY_URL: http://schema-registry:8081
+      ICEBERG_REST_URL: http://iceberg-rest:8181
+    depends_on:
+      - connect
+      - schema-registry
+      - iceberg-rest
     networks:
       - lakehouse-net
 

@@ -49,12 +49,19 @@ def create_spark_session() -> SparkSession:
     minio_endpoint = os.getenv("MINIO_ENDPOINT", "http://minio:9000")
     minio_access_key = os.getenv("MINIO_ROOT_USER", "admin")
     minio_secret_key = os.getenv("MINIO_ROOT_PASSWORD", "password")
+    catalog_uri = os.getenv("ICEBERG_REST_URI", "http://iceberg-rest:8181")
     return (
         SparkSession.builder.appName("CDC-Lakehouse-Ingestion")
         .config("spark.sql.extensions", "org.apache.iceberg.spark.extensions.IcebergSparkSessionExtensions")
-        .config("spark.sql.catalog.my_catalog", "org.apache.iceberg.spark.SparkCatalog")
-        .config("spark.sql.catalog.my_catalog.type", "hadoop")
-        .config("spark.sql.catalog.my_catalog.warehouse", "s3a://lakehouse/warehouse")
+        .config(f"spark.sql.catalog.{ICEBERG_CATALOG}", "org.apache.iceberg.spark.SparkCatalog")
+        .config(f"spark.sql.catalog.{ICEBERG_CATALOG}.type", "rest")
+        .config(f"spark.sql.catalog.{ICEBERG_CATALOG}.uri", catalog_uri)
+        .config(f"spark.sql.catalog.{ICEBERG_CATALOG}.warehouse", "s3://lakehouse/warehouse")
+        .config(f"spark.sql.catalog.{ICEBERG_CATALOG}.io-impl", "org.apache.iceberg.aws.s3.S3FileIO")
+        .config(f"spark.sql.catalog.{ICEBERG_CATALOG}.s3.endpoint", minio_endpoint)
+        .config(f"spark.sql.catalog.{ICEBERG_CATALOG}.s3.path-style-access", "true")
+        .config(f"spark.sql.catalog.{ICEBERG_CATALOG}.s3.access-key-id", minio_access_key)
+        .config(f"spark.sql.catalog.{ICEBERG_CATALOG}.s3.secret-access-key", minio_secret_key)
         .config("spark.sql.defaultCatalog", ICEBERG_CATALOG)
         .config("spark.hadoop.fs.s3a.endpoint", minio_endpoint)
         .config("spark.hadoop.fs.s3a.access.key", minio_access_key)
@@ -136,6 +143,23 @@ def create_lakehouse_tables(spark: SparkSession) -> None:
 
     spark.sql(
         f"""
+        CREATE TABLE IF NOT EXISTS {qualified(BRONZE_NAMESPACE, 'dead_letter_events')} (
+            event_id STRING,
+            topic STRING,
+            table_name STRING,
+            error_reason STRING,
+            ingest_ts TIMESTAMP,
+            kafka_partition INT,
+            kafka_offset BIGINT,
+            key_json STRING,
+            value_json STRING,
+            batch_id BIGINT
+        ) USING iceberg
+        """
+    )
+
+    spark.sql(
+        f"""
         CREATE TABLE IF NOT EXISTS {qualified(GOLD_NAMESPACE, 'daily_transaction_summary')} (
             transaction_date DATE,
             transaction_type STRING,
@@ -185,7 +209,6 @@ def parse_table_events(batch_df: DataFrame, table_name: str, config: Dict[str, o
             col("data.payload.before").alias("before"),
             col("data.payload.after").alias("after"),
         )
-        .filter(col("op").isNotNull())
     )
 
 
@@ -205,6 +228,29 @@ def append_bronze(parsed_df: DataFrame, table_name: str, batch_id: int) -> None:
         lit(batch_id).cast("long").alias("batch_id"),
     )
     bronze_df.writeTo(qualified(BRONZE_NAMESPACE, table_name + "_cdc_events")).append()
+
+
+def append_dead_letters(parsed_df: DataFrame, table_name: str, batch_id: int) -> int:
+    """Persist records Spark could not parse as valid Debezium CDC events."""
+    invalid_df = parsed_df.filter(col("op").isNull())
+    invalid_count = invalid_df.count()
+    if invalid_count == 0:
+        return 0
+
+    dlq_df = invalid_df.select(
+        concat_ws(":", col("topic"), col("kafka_partition"), col("kafka_offset")).alias("event_id"),
+        col("topic"),
+        lit(table_name).alias("table_name"),
+        lit("missing_or_invalid_debezium_payload").alias("error_reason"),
+        current_timestamp().alias("ingest_ts"),
+        col("kafka_partition"),
+        col("kafka_offset"),
+        col("key_json"),
+        col("value_json"),
+        lit(batch_id).cast("long").alias("batch_id"),
+    )
+    dlq_df.writeTo(qualified(BRONZE_NAMESPACE, "dead_letter_events")).append()
+    return invalid_count
 
 
 def latest_changes(parsed_df: DataFrame, config: Dict[str, object]) -> DataFrame:
@@ -337,8 +383,14 @@ def process_cdc_batch(batch_df: DataFrame, batch_id: int, spark: SparkSession) -
     processed_tables = 0
 
     for table_name, config in CDC_TABLES.items():
-        parsed_df = parse_table_events(batch_df, table_name, config)
+        table_events_df = parse_table_events(batch_df, table_name, config)
+        if table_events_df.isEmpty():
+            continue
+
+        invalid_count = append_dead_letters(table_events_df, table_name, batch_id)
+        parsed_df = table_events_df.filter(col("op").isNotNull())
         if parsed_df.isEmpty():
+            logger.warning("Batch %s: %s invalid events written to DLQ for %s", batch_id, invalid_count, table_name)
             continue
 
         event_count = parsed_df.count()
@@ -346,7 +398,13 @@ def process_cdc_batch(batch_df: DataFrame, batch_id: int, spark: SparkSession) -
         latest_df = latest_changes(parsed_df, config)
         merge_silver(spark, latest_df, table_name, config)
         processed_tables += 1
-        logger.info("Batch %s: %s events processed for %s", batch_id, event_count, table_name)
+        logger.info(
+            "Batch %s: %s valid and %s invalid events processed for %s",
+            batch_id,
+            event_count,
+            invalid_count,
+            table_name,
+        )
 
     if processed_tables:
         refresh_gold_tables(spark)
@@ -363,14 +421,17 @@ def main() -> None:
         spark.readStream.format("kafka")
         .option("kafka.bootstrap.servers", "broker:29092")
         .option("subscribePattern", topic_pattern())
-        .option("startingOffsets", "earliest")
+        .option("startingOffsets", os.getenv("KAFKA_STARTING_OFFSETS", "earliest"))
         .load()
     )
 
     query = (
         kafka_df.writeStream.foreachBatch(lambda df, batch_id: process_cdc_batch(df, batch_id, spark))
         .trigger(processingTime="10 seconds")
-        .option("checkpointLocation", "s3a://lakehouse/checkpoints/multi_table_cdc")
+        .option(
+            "checkpointLocation",
+            os.getenv("SPARK_CHECKPOINT_LOCATION", "s3a://lakehouse/checkpoints/multi_table_cdc"),
+        )
         .start()
     )
 

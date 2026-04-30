@@ -1,0 +1,38 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: iceberg-rest
+  namespace: cdc-lakehouse
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: iceberg-rest
+  template:
+    metadata:
+      labels:
+        app: iceberg-rest
+    spec:
+      containers:
+        - name: iceberg-rest
+          image: tabulario/iceberg-rest:1.4.2
+          ports:
+            - containerPort: 8181
+          env:
+            - name: CATALOG_WAREHOUSE
+              valueFrom:
+                configMapKeyRef:
+                  name: lakehouse-config
+                  key: WAREHOUSE
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: iceberg-rest
+  namespace: cdc-lakehouse
+spec:
+  selector:
+    app: iceberg-rest
+  ports:
+    - port: 8181
+      targetPort: 8181

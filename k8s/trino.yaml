@@ -1,0 +1,38 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: trino
+  namespace: cdc-lakehouse
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: trino
+  template:
+    metadata:
+      labels:
+        app: trino
+    spec:
+      containers:
+        - name: trino
+          image: trinodb/trino:435
+          ports:
+            - containerPort: 8085
+          env:
+            - name: ICEBERG_REST_URI
+              valueFrom:
+                configMapKeyRef:
+                  name: lakehouse-config
+                  key: ICEBERG_REST_URI
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: trino
+  namespace: cdc-lakehouse
+spec:
+  selector:
+    app: trino
+  ports:
+    - port: 8085
+      targetPort: 8085

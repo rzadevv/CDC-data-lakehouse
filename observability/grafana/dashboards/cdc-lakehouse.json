@@ -1,0 +1,43 @@
+{
+  "uid": "cdc-lakehouse-overview",
+  "title": "CDC Lakehouse Overview",
+  "schemaVersion": 39,
+  "version": 1,
+  "refresh": "10s",
+  "panels": [
+    {
+      "type": "stat",
+      "title": "Debezium Connect Up",
+      "gridPos": {"h": 8, "w": 6, "x": 0, "y": 0},
+      "targets": [{"expr": "cdc_connect_up", "refId": "A"}]
+    },
+    {
+      "type": "stat",
+      "title": "Schema Registry Up",
+      "gridPos": {"h": 8, "w": 6, "x": 6, "y": 0},
+      "targets": [{"expr": "cdc_schema_registry_up", "refId": "A"}]
+    },
+    {
+      "type": "stat",
+      "title": "Registered Connectors",
+      "gridPos": {"h": 8, "w": 6, "x": 12, "y": 0},
+      "targets": [{"expr": "cdc_connect_connector_count", "refId": "A"}]
+    },
+    {
+      "type": "stat",
+      "title": "Schema Subjects",
+      "gridPos": {"h": 8, "w": 6, "x": 18, "y": 0},
+      "targets": [{"expr": "cdc_schema_subject_count", "refId": "A"}]
+    },
+    {
+      "type": "timeseries",
+      "title": "Platform Health",
+      "gridPos": {"h": 9, "w": 24, "x": 0, "y": 8},
+      "targets": [
+        {"expr": "cdc_connect_up", "legendFormat": "connect", "refId": "A"},
+        {"expr": "cdc_schema_registry_up", "legendFormat": "schema-registry", "refId": "B"},
+        {"expr": "cdc_iceberg_rest_up", "legendFormat": "iceberg-rest", "refId": "C"}
+      ]
+    }
+  ]
+}

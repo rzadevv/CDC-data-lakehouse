@@ -1,0 +1,11 @@
+apiVersion: 1
+
+providers:
+  - name: CDC Lakehouse
+    orgId: 1
+    folder: CDC Lakehouse
+    type: file
+    disableDeletion: false
+    editable: true
+    options:
+      path: /var/lib/grafana/dashboards
